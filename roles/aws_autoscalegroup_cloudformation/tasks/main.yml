@@ -1,0 +1,24 @@
+---
+#tasks file for asg
+
+- name: Create AutoScale Group and LaunchConfig via cloudformation
+  cloudformation: >
+    stack_name={{ vpc_name }} 
+    state=present
+    region={{ region }}
+    disable_rollback=true
+    template=roles/aws_autoscalegroup_cloudformation/files/asg_lc.json
+  args:
+    template_parameters:
+      InstanceType: "m3.medium"
+      AvailabilityZones: "{{ availability_zones | join(',') }}"
+      Subnets: "{{ asg_subnets | join(',') }}"
+      ImageId: "{{ image_id }}"
+      KeyName: "{{ key_name }}"
+      SecurityGroups: "{{ lc_security_groups | join(',')}}"
+      LoadBalancerNames: "{{ load_balancers | join(',') }}"
+      AutoScalingGroupName: "{{ as_group }}"
+  register: stack
+
+- debug: var=stack
+

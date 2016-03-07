@@ -1,0 +1,7 @@
+#!/bin/bash
+
+export AWS_ACCESS_KEY_ID="<< YOUR ACCESS KEY ID HERE>>"
+export AWS_SECRET_ACCESS_KEY="<< YOUR SECRET ACCESS KEY HERE >>>"
+
+./ec2.py
+

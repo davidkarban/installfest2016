@@ -1,0 +1,3 @@
+# Here define key, that is added to newly provisioned virtual machines
+ssh_key_name: "default"
+

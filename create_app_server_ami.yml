@@ -1,0 +1,115 @@
+- hosts: localhost
+  tasks:
+    - name: Create an instance to configure AMI
+      ec2:
+        key_name: "{{ ssh_key_name }}
+        group: ssh_access
+        instance_type: m3.medium
+#        instance_type: t2.micro
+# debiani wheezy
+#        image: "ami-61e56916"
+# debian jessie, eu-west-1 region, hvm
+#        image: "ami-e31a6594"
+# debian jessie, eu-west-1 region, paravirt
+        image: "ami-971a65e0"
+        wait: yes
+        wait_timeout: 500
+        count_tag: 
+          type: installfest2016_app_ami
+        exact_count: 1
+        region: eu-west-1
+        instance_tags:
+         type: installfest2016_app_ami
+         project: temporary
+         policy: immutable
+        vpc_subnet_id: subnet-d58db88c
+        assign_public_ip: yes
+      register: app_servers
+
+    - debug: var=app_servers
+
+    - name: Add the instances we created (by public IP) to the group 'app_servers'
+      add_host:
+        hostname: "{{ item.dns_name }}"
+        ansible_host: "{{ item.public_ip }}"
+        groups: tag_type_installfest2016_app_ami
+      with_items: app_servers.instances
+
+    - name: Wait until ssh is available
+      local_action: wait_for port=22 host={{ item.public_ip }} search_regex=OpenSSH delay=10
+      with_items: app_servers.instances
+
+- hosts: tag_type_installfest2016_app_ami
+  remote_user: admin
+  become: yes
+# TODO: vpc subnets should be get from vpc, not enought time to do it now
+  vars:
+    vpc_subnets:
+      - 172.17.0.0/20
+      - 172.17.16.0/20
+      - 172.17.32.0/20
+
+  pre_tasks:
+    - name: Ensure www user for web sites do exists
+      tags: apache
+      user: name=www comment="Web user" state=present shell=/bin/bash createhome=yes generate_ssh_key=yes ssh_key_bits=4096
+  roles:
+    - davidkarban.bootstrap
+    - davidkarban.common
+# TODO: Monitor thru amazon?
+#    - { role: nrpe, when: nrpe }
+# TODO: later, for now security groups are enough
+#    - shorewall-app
+    - php
+    - php-apc
+    - davidkarban.apache2
+    - davidkarban.apache2_vhost
+    - davidkarban.git
+  tasks:
+# if deafult is not active, there is a problem with elb check, it takes redirect as a problem
+    - name: Ensure apache has needed modules
+      tags: apache
+      command: a2enmod {{ item }} creates=/etc/apache2/mods-enabled/{{ item }}.load
+      with_items:
+        - ssl
+        - vhost_alias
+        - rewrite
+        - remoteip
+      notify: reload apache
+
+# deploy the app
+
+    - name: Ensure web home directory exists
+      file: path=/var/www/html/ state=directory owner=www group=www
+
+    - name: Ensure html directory is empty
+      file: path=/var/www/html/index.html state=absent
+
+    - name: Deploy applicationg from git server
+      tags: deploy
+      become: yes
+      become_user: www
+      git: accept_hostkey=True repo=https://github.com/davidkarban/simplewebpage.git dest=/var/www/html/ force=yes
+
+- hosts: localhost
+  tasks:
+    - debug: var=app_servers
+
+    - name: Create an ami image for deploy
+      ec2_ami: 
+        description: "Installfest2016 app server AMI"
+        name: "installfest206_app_prod_server"
+        instance_id: "{{ app_servers.tagged_instances.0.id }}"
+        wait: yes
+        region: eu-west-1
+      register: installfest2016_ami_image
+
+#    - name: Put image to autoscaling group
+     
+
+#    - name: Remove running temporary instance
+#      ec2:
+#        state: 'absent'
+#        instance_ids: "{{ app_servers.tagged_instances.0.id }}"
+#        region: eu-west-1
+

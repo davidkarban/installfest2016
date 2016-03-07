@@ -1,0 +1,186 @@
+# tasks file for aws_infrastructure
+- name: Ensure vpc is created
+  ec2_vpc:
+    state: present
+    cidr_block: "{{ vpc_cidr_block }}"
+    resource_tags: { "Name":" {{ vpc_name }}" }
+    subnets: "{{ vpc_subnets }}"       
+    internet_gateway: True
+    route_tables: "{{ route_tables }}"
+    region: "{{ region }}"
+    wait: yes
+  register: vpc
+
+- name: Ensure ssh access is available
+  ec2_group:
+    name: ssh_access
+    description: SSH access for admins
+    region: "{{ region }}"
+    vpc_id: "{{ vpc.vpc_id }}"
+    rules:
+      - proto: tcp
+        from_port: 22
+        to_port: 22
+        cidr_ip: 0.0.0.0/0
+  tags: security_groups
+  register: ssh_access_group
+
+- name: create app security group
+  ec2_group:
+    name: "{{ vpc_name }}"
+    description: "{{ vpc_name }} security group"
+    region: "{{ region }}"
+    rules:
+      - proto: tcp
+        from_port: 80
+        to_port: 80
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 443
+        to_port: 443
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 0
+        to_port: 65535
+        group_name: "{{ vpc_name }}"
+      - proto: udp
+        from_port: 0
+        to_port: 65535
+        group_name: "{{ vpc_name }}"
+      - proto: icmp
+        from_port: 0
+        to_port: 0
+        group_name: "{{ vpc_name }}"
+    vpc_id: "{{ vpc.vpc_id }}"
+  tags: security_groups
+  register: app_security_group
+
+- name: create ELB security group
+  ec2_group:
+    name: "{{ vpc_name }}_elb"
+    description: "{{ vpc_name }}_elb security group"
+    region: "{{ region }}"
+    rules:
+      - proto: tcp
+        from_port: 80
+        to_port: 80
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        from_port: 0
+        to_port: 65535
+        group_name: "{{ vpc_name }}"
+      - proto: icmp
+        from_port: 0
+        to_port: 0
+        cidr_ip: 0.0.0.0/0
+    vpc_id: "{{ vpc.vpc_id }}"
+  tags: security_groups
+  register: elb_security_group
+
+- name: create mysql security group
+  ec2_group:
+    name: "{{ vpc_name }}_mysql"
+    description: "{{ vpc_name }}_mysql security group"
+    region: "{{ region }}"
+    rules:
+      - proto: tcp
+        from_port: 3306
+        to_port: 3306
+        cidr_ip: 0.0.0.0/0
+      - proto: icmp
+        from_port: 0
+        to_port: 0
+        group_name: "{{ vpc_name }}"
+    vpc_id: "{{ vpc.vpc_id }}"
+  tags: security_groups
+  register: mysql_security_group
+
+- debug: var=mysql_security_group
+
+- name: Ensure load balancer is available
+  ec2_elb_lb:
+    name: "{{ lb_name }}"
+    region: "{{ region }}"
+    security_group_ids:
+      - "{{ elb_security_group.group_id }}"
+    state: present
+    subnets: "{{ asg_subnets }}"
+    connection_draining_timeout: 60
+    listeners:
+      - protocol: http
+        load_balancer_port: 80
+        instance_port: 80
+    health_check:
+          ping_protocol: http # options are http, https, ssl, tcp
+          ping_port: 80
+          ping_path: /
+          response_timeout: 10 # seconds
+          interval: 30 # seconds
+          unhealthy_threshold: 2
+          healthy_threshold: 10
+#        access_logs:
+#          interval: 5 # minutes (defaults to 60)
+#          s3_location: "my-bucket" # This value is required if access_logs is set
+#          s3_prefix: "logs"
+  register: load_balancer
+
+- debug: var=vpc
+
+- name: Prepare subnet group for mysql instance
+  rds_subnet_group:
+    state: present
+    name: Installfest2016_mysql_subnet_group
+    description: Subnet group for mysql production use
+    subnets:
+      - "{{ vpc.subnets.0.id }}"
+      - "{{ vpc.subnets.1.id }}"
+      - "{{ vpc.subnets.2.id }}"
+    region: "{{ region }}"
+
+- name: Ensure mysql RDS instance is available
+  rds:
+    command: create
+    instance_name: "installfest2016-mysql"
+    db_engine: MySQL
+    size: 20
+    instance_type: db.t2.small
+    username: root
+    password: "{{ lookup('password', playbook_dir + '/credentials/installfest2016_rds_mysql/installfest2016_rds_root_mysql_password length=41') }}"
+    tags:
+      type: mysql
+      project: installfest2016
+    region: "{{ region }}"
+    multi_zone: yes
+    subnet: installfest2016_mysql_subnet_group
+    vpc_security_groups: "{{ mysql_security_group.group_id }}"
+    wait: yes
+  register: mysql_rds_instance
+
+- debug: var=mysql_rds_instance
+
+# NOTE: Should be inside aws vpc, it will not work from outside due to security zones
+#- name: Create database for user gd_live
+#  tags: mysql
+#  mysql_db:
+#    login_host: "{{ mysql_rds_instance.instance.endpoint }}"
+#    login_password: "{{ lookup('password', playbook_dir + '/credentials/instalfest2016_rds_mysql/installfest2016_rds_root_mysql_password length=64') }}"
+#    login_user: "{{ mysql_rds_instance.instance.username }}"
+#    db: "installfest2016"
+#    collation: "utf8_unicode_ci"
+#    encoding: "utf8"
+#    state: present
+#
+#- name: Create user for gd_live
+#  tags:
+#    - mysql
+#    - mysql_passwords
+#  mysql_user:
+#    login_host: "{{ mysql_rds_instance.instance.endpoint }}"
+#    login_password: "{{ lookup('password', playbook_dir + '/credentials/installfest2016_rds_mysql/installfest2016_rds_root_mysql_password length=64') }}"
+#    login_user: "{{ mysql_rds_instance.instance.username }}"
+#    name: "installfest2016"
+#    host: ""
+#    password: '{{ lookup("password", inventory_dir + "/credentials/installfest2016_rds_mysql/installfest2016_mysql_password length=64") }}'
+#    priv: 'installfest2016.*:ALL'
+#    state: 'present'
+
